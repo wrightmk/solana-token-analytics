@@ -13,8 +13,6 @@ function buildChannelMessage(
   return {
     type,
     channels,
-    accessToken: '',
-    _metadata: { initiatedAt: Date.now() },
   }
 }
 
