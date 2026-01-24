@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react'
+import { useRef, useEffect, useCallback, useMemo } from 'react'
 import { useAtom } from 'jotai'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useTrades } from '../../hooks/useTrades'
@@ -9,7 +9,17 @@ import {
 } from '../../store/atoms'
 import { TradeRow } from './TradeRow'
 import { DEFAULT_CURRENCY, TRADES_ROW_HEIGHT } from '../../utils/constants'
-import type { TradesTableProps } from '../../api/types'
+import type { Trade, TradesTableProps } from '../../api/types'
+import { useQueryClient } from '@tanstack/react-query'
+
+function dedupe(trades: Trade[], existing?: Set<string>): Trade[] {
+  const seen = existing ?? new Set<string>()
+  return trades.filter((t) => {
+    if (seen.has(t.txHash)) return false
+    seen.add(t.txHash)
+    return true
+  })
+}
 
 export function TradesTable({
   poolAddresses,
@@ -17,6 +27,8 @@ export function TradesTable({
 }: TradesTableProps) {
   const [tokenAddress] = useAtom(selectedTokenAtom)
   const [pendingTrades, setPendingTrades] = useAtom(pendingTradesAtom)
+  const queryClient = useQueryClient()
+
   const [isAtTop, setIsAtTop] = useAtom(isAtTopOfTradesAtom)
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -29,15 +41,22 @@ export function TradesTable({
     error,
   } = useTrades(tokenAddress, poolAddresses)
 
-  const allTrades = data?.pages.flatMap((page) => page.transactions) ?? []
+  const allTrades = useMemo(
+    () => dedupe(data?.pages.flatMap((page) => page.transactions) ?? []),
+    [data?.pages]
+  )
 
-  const displayTrades = isAtTop ? [...pendingTrades, ...allTrades] : allTrades
+  const getItemKey = useCallback(
+    (index: number) => allTrades[index]?.txHash ?? index,
+    [allTrades]
+  )
 
   const rowVirtualizer = useVirtualizer({
-    count: displayTrades.length,
+    count: allTrades.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => TRADES_ROW_HEIGHT,
     overscan: 25,
+    getItemKey,
   })
 
   const handleScroll = useCallback(() => {
@@ -51,6 +70,34 @@ export function TradesTable({
     }
   }, [setIsAtTop, hasNextPage, isFetchingNextPage, fetchNextPage])
 
+  const flushPendingTrades = useCallback(
+    (scrollToTop: boolean) => {
+      queryClient.setQueryData(
+        ['trades', tokenAddress, poolAddresses],
+        (old: { pages: { transactions: Trade[] }[] } | undefined) => {
+          if (!old) return old
+          return {
+            ...old,
+            pages: old.pages.map((page, idx) =>
+              idx === 0
+                ? {
+                    ...page,
+                    transactions: [...pendingTrades, ...page.transactions],
+                  }
+                : page
+            ),
+          }
+        }
+      )
+
+      setPendingTrades([])
+      if (scrollToTop) {
+        parentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      }
+    },
+    [pendingTrades, poolAddresses, queryClient, setPendingTrades, tokenAddress]
+  )
+
   useEffect(() => {
     setPendingTrades([])
     setIsAtTop(true)
@@ -58,13 +105,10 @@ export function TradesTable({
   }, [tokenAddress, setIsAtTop, setPendingTrades])
 
   useEffect(() => {
-    if (isAtTop) setPendingTrades([])
-  }, [isAtTop, setPendingTrades])
-
-  const flushPendingTrades = useCallback(() => {
-    setPendingTrades([])
-    parentRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
-  }, [setPendingTrades])
+    if (isAtTop) {
+      flushPendingTrades(false)
+    }
+  }, [isAtTop, flushPendingTrades])
 
   if (!tokenAddress) {
     return null
@@ -95,7 +139,7 @@ export function TradesTable({
         <h3 className="text-lg font-semibold text-white">Recent Trades</h3>
         {pendingTrades.length > 0 && !isAtTop && (
           <button
-            onClick={flushPendingTrades}
+            onClick={() => flushPendingTrades(true)}
             className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-full transition-colors"
           >
             {pendingTrades.length} new trade
@@ -125,10 +169,10 @@ export function TradesTable({
           }}
         >
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            const trade = displayTrades[virtualRow.index]
+            const trade = allTrades[virtualRow.index]
             return (
               <div
-                key={`${trade.txHash}-${virtualRow.index}`}
+                key={virtualRow.key}
                 style={{
                   position: 'absolute',
                   top: 0,
